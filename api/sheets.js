@@ -3,6 +3,29 @@ import { google } from 'googleapis'
 const SHARED_SHEET = 'Gastos_Compartidos'
 const PRIVATE_SHEET_A = 'Privado_UsuarioA'
 const PRIVATE_SHEET_B = 'Privado_UsuarioB'
+const REQUIRED_SHEETS = [SHARED_SHEET, PRIVATE_SHEET_A, PRIVATE_SHEET_B]
+
+const SHEET_HEADERS = {
+  [SHARED_SHEET]: [
+    'room',
+    'createdAt',
+    'rawInput',
+    'accion',
+    'concepto',
+    'montoTotal',
+    'divisor',
+    'montoPorPersona',
+    'pagador',
+    'deudaGeneradaPareja',
+    'destinoAparente'
+  ],
+  [PRIVATE_SHEET_A]: ['room', 'createdAt', 'type', 'concepto', 'montoTotal', 'rawInput', 'accion', 'pagador'],
+  [PRIVATE_SHEET_B]: ['room', 'createdAt', 'type', 'concepto', 'montoTotal', 'rawInput', 'accion', 'pagador']
+}
+
+function rangeOf(sheetName, range) {
+  return `'${sheetName.replace(/'/g, "''")}'!${range}`
+}
 
 function profileSheet(profile) {
   return profile === 'UsuarioB' ? PRIVATE_SHEET_B : PRIVATE_SHEET_A
@@ -47,13 +70,31 @@ function toExpenseFromSharedRow(row) {
   }
 }
 
+function normalizePrivateKey(rawKey) {
+  if (!rawKey) return ''
+
+  let key = String(rawKey).trim()
+
+  if ((key.startsWith('"') && key.endsWith('"')) || (key.startsWith("'") && key.endsWith("'"))) {
+    key = key.slice(1, -1)
+  }
+
+  key = key.replace(/\\r/g, '').replace(/\r/g, '').replace(/\\n/g, '\n').trim()
+
+  return key
+}
+
 async function getClient() {
   const spreadsheetId = process.env.GOOGLE_SHEETS_ID
   const clientEmail = process.env.GOOGLE_CLIENT_EMAIL
-  const privateKey = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n')
+  const privateKey = normalizePrivateKey(process.env.GOOGLE_PRIVATE_KEY)
 
   if (!spreadsheetId || !clientEmail || !privateKey) {
     throw new Error('Faltan variables de entorno de Google Sheets en Vercel.')
+  }
+
+  if (!privateKey.includes('BEGIN PRIVATE KEY')) {
+    throw new Error('GOOGLE_PRIVATE_KEY inválida: falta encabezado BEGIN PRIVATE KEY.')
   }
 
   const auth = new google.auth.JWT({
@@ -65,7 +106,47 @@ async function getClient() {
   await auth.authorize()
   const sheets = google.sheets({ version: 'v4', auth })
 
+  await ensureWorkbookStructure(sheets, spreadsheetId)
+
   return { sheets, spreadsheetId }
+}
+
+async function ensureWorkbookStructure(sheets, spreadsheetId) {
+  const meta = await sheets.spreadsheets.get({
+    spreadsheetId,
+    fields: 'sheets.properties.title'
+  })
+
+  const existingTitles = new Set((meta.data.sheets || []).map((sheet) => sheet.properties?.title).filter(Boolean))
+  const missing = REQUIRED_SHEETS.filter((title) => !existingTitles.has(title))
+
+  if (missing.length) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: missing.map((title) => ({ addSheet: { properties: { title } } }))
+      }
+    })
+  }
+
+  await Promise.all(
+    REQUIRED_SHEETS.map(async (title) => {
+      const { data } = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: rangeOf(title, '1:1')
+      })
+
+      const firstRow = data.values?.[0] || []
+      if (!firstRow.length) {
+        await sheets.spreadsheets.values.update({
+          spreadsheetId,
+          range: rangeOf(title, '1:1'),
+          valueInputOption: 'RAW',
+          requestBody: { values: [SHEET_HEADERS[title]] }
+        })
+      }
+    })
+  )
 }
 
 async function readValues(sheets, spreadsheetId, range) {
@@ -87,9 +168,9 @@ async function loadRoomData(payload) {
   const { sheets, spreadsheetId } = await getClient()
 
   const [sharedRows, privateRowsA, privateRowsB] = await Promise.all([
-    readValues(sheets, spreadsheetId, `${SHARED_SHEET}!A2:K`),
-    readValues(sheets, spreadsheetId, `${PRIVATE_SHEET_A}!A2:H`),
-    readValues(sheets, spreadsheetId, `${PRIVATE_SHEET_B}!A2:H`)
+    readValues(sheets, spreadsheetId, rangeOf(SHARED_SHEET, 'A2:K')),
+    readValues(sheets, spreadsheetId, rangeOf(PRIVATE_SHEET_A, 'A2:H')),
+    readValues(sheets, spreadsheetId, rangeOf(PRIVATE_SHEET_B, 'A2:H'))
   ])
 
   const shared = sharedRows
@@ -127,7 +208,7 @@ async function appendSharedExpense(payload) {
   const { sheets, spreadsheetId } = await getClient()
   const createdAt = new Date().toISOString()
 
-  await appendValues(sheets, spreadsheetId, `${SHARED_SHEET}!A:K`, [
+  await appendValues(sheets, spreadsheetId, rangeOf(SHARED_SHEET, 'A:K'), [
     room,
     createdAt,
     expense.rawInput || '',
@@ -150,7 +231,7 @@ async function appendPrivateExpense(payload) {
   const sheet = profileSheet(profile)
   const createdAt = new Date().toISOString()
 
-  await appendValues(sheets, spreadsheetId, `${sheet}!A:H`, [
+  await appendValues(sheets, spreadsheetId, rangeOf(sheet, 'A:H'), [
     room,
     createdAt,
     'expense',
@@ -170,7 +251,7 @@ async function updateSalary(payload) {
   const sheet = profileSheet(profile)
   const createdAt = new Date().toISOString()
 
-  await appendValues(sheets, spreadsheetId, `${sheet}!A:H`, [
+  await appendValues(sheets, spreadsheetId, rangeOf(sheet, 'A:H'), [
     room,
     createdAt,
     'salary',
@@ -205,6 +286,15 @@ export default async function handler(req, res) {
     const result = await handlers[action](payload || {})
     return res.status(200).json({ ok: true, result })
   } catch (error) {
-    return res.status(500).json({ error: error.message || 'Error interno en API Sheets.' })
+    const message = String(error?.message || 'Error interno en API Sheets.')
+
+    if (message.includes('DECODER routines::unsupported')) {
+      return res.status(500).json({
+        error:
+          'GOOGLE_PRIVATE_KEY inválida en Vercel: pegala en una sola línea con \\n y sin comillas adicionales.'
+      })
+    }
+
+    return res.status(500).json({ error: message })
   }
 }
