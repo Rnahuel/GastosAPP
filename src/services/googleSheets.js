@@ -44,16 +44,6 @@ async function callSheetsApi(action, payload) {
   return response.json()
 }
 
-function shouldUseLocalFallback(error) {
-  const message = String(error?.message || '').toLowerCase()
-  return (
-    message.includes('faltan variables de entorno') ||
-    message.includes('failed to fetch') ||
-    message.includes('500') ||
-    message.includes('google sheets')
-  )
-}
-
 async function tryRealOrFallback(action, payload, fallback) {
   if (!USE_REAL_SHEETS || sheetsUnavailable) {
     return fallback()
@@ -63,12 +53,9 @@ async function tryRealOrFallback(action, payload, fallback) {
     const data = await callSheetsApi(action, payload)
     return data.result
   } catch (error) {
-    if (shouldUseLocalFallback(error)) {
-      sheetsUnavailable = true
-      console.warn('Sheets no disponible; usando almacenamiento local temporalmente.')
-      return fallback()
-    }
-    throw error
+    sheetsUnavailable = true
+    console.warn('Sheets no disponible; usando almacenamiento local temporalmente.', error)
+    return fallback()
   }
 }
 

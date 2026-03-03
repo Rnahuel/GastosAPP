@@ -53,6 +53,8 @@ export default function App() {
       setPrivateState(data.private[nextProfile])
       setSalaryDraft(String(data.private[nextProfile].salary || 0))
       setSyncMessage('Sesión iniciada.')
+    } catch {
+      setSyncMessage('No se pudo cargar la sala. Reintentá en unos segundos.')
     } finally {
       setLoading(false)
     }
