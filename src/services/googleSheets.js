@@ -1,5 +1,6 @@
 const LATENCY = 500
 const USE_REAL_SHEETS = import.meta.env.VITE_USE_REAL_SHEETS === 'true'
+let sheetsUnavailable = false
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -43,55 +44,75 @@ async function callSheetsApi(action, payload) {
   return response.json()
 }
 
-export async function loadRoomData({ room }) {
-  if (USE_REAL_SHEETS) {
-    const data = await callSheetsApi('loadRoomData', { room })
-    return data.result
+function shouldUseLocalFallback(error) {
+  const message = String(error?.message || '').toLowerCase()
+  return (
+    message.includes('faltan variables de entorno') ||
+    message.includes('failed to fetch') ||
+    message.includes('500') ||
+    message.includes('google sheets')
+  )
+}
+
+async function tryRealOrFallback(action, payload, fallback) {
+  if (!USE_REAL_SHEETS || sheetsUnavailable) {
+    return fallback()
   }
-  await wait(LATENCY)
-  return getStore(room)
+
+  try {
+    const data = await callSheetsApi(action, payload)
+    return data.result
+  } catch (error) {
+    if (shouldUseLocalFallback(error)) {
+      sheetsUnavailable = true
+      console.warn('Sheets no disponible; usando almacenamiento local temporalmente.')
+      return fallback()
+    }
+    throw error
+  }
+}
+
+export async function loadRoomData({ room }) {
+  return tryRealOrFallback('loadRoomData', { room }, async () => {
+    await wait(LATENCY)
+    return getStore(room)
+  })
 }
 
 export async function appendSharedExpense({ room, expense }) {
-  if (USE_REAL_SHEETS) {
-    const data = await callSheetsApi('appendSharedExpense', { room, expense })
-    return data.result
-  }
-  await wait(LATENCY)
-  const store = getStore(room)
-  store.shared.unshift({
-    id: crypto.randomUUID(),
-    createdAt: new Date().toISOString(),
-    ...expense
+  return tryRealOrFallback('appendSharedExpense', { room, expense }, async () => {
+    await wait(LATENCY)
+    const store = getStore(room)
+    store.shared.unshift({
+      id: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+      ...expense
+    })
+    saveStore(room, store)
+    return store.shared[0]
   })
-  saveStore(room, store)
-  return store.shared[0]
 }
 
 export async function appendPrivateExpense({ room, profile, expense }) {
-  if (USE_REAL_SHEETS) {
-    const data = await callSheetsApi('appendPrivateExpense', { room, profile, expense })
-    return data.result
-  }
-  await wait(LATENCY)
-  const store = getStore(room)
-  store.private[profile].personalExpenses.unshift({
-    id: crypto.randomUUID(),
-    createdAt: new Date().toISOString(),
-    ...expense
+  return tryRealOrFallback('appendPrivateExpense', { room, profile, expense }, async () => {
+    await wait(LATENCY)
+    const store = getStore(room)
+    store.private[profile].personalExpenses.unshift({
+      id: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+      ...expense
+    })
+    saveStore(room, store)
+    return store.private[profile].personalExpenses[0]
   })
-  saveStore(room, store)
-  return store.private[profile].personalExpenses[0]
 }
 
 export async function updateSalary({ room, profile, salary }) {
-  if (USE_REAL_SHEETS) {
-    const data = await callSheetsApi('updateSalary', { room, profile, salary })
-    return data.result
-  }
-  await wait(LATENCY)
-  const store = getStore(room)
-  store.private[profile].salary = salary
-  saveStore(room, store)
-  return salary
+  return tryRealOrFallback('updateSalary', { room, profile, salary }, async () => {
+    await wait(LATENCY)
+    const store = getStore(room)
+    store.private[profile].salary = salary
+    saveStore(room, store)
+    return salary
+  })
 }
